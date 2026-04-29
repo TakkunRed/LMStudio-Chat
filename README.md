@@ -83,7 +83,7 @@ Function Calling（カスタムツール）を用いて、**MCPツールを連�
     ```
 
     上記の設定は、
-    ![MY-MCPSV-POSTGRES](https://github.com/TakkunRed/MY-MCPSV-POSTGRES) を使用した場合の設定となります。
+    [MY-MCPSV-POSTGRES](https://github.com/TakkunRed/MY-MCPSV-POSTGRES) を使用した場合の設定となります。
 
 
 ### 利用方法
