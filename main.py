@@ -9,6 +9,10 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional
 
+from dotenv import load_dotenv
+from mcp import ClientSession
+from mcp.client.stdio import stdio_client
+
 from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -41,7 +45,7 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     model: str = ""
     temperature: float = 0.7
-    max_tokens: int = 2048
+    max_tokens: int = 8196
 
 
 class LoginRequest(BaseModel):
@@ -135,7 +139,7 @@ async def send_to_lm_studio(
     messages: list[dict],
     model: str = "",
     temperature: float = 0.7,
-    max_tokens: int = 2048
+    max_tokens: int = 8196
 ) -> str:
     """LM Studio にチャットリクエストを送信"""
     api_key = config.Config.get_api_key()
@@ -260,7 +264,7 @@ async def api_models(request: Request):
 
 @app.post("/api/chat")
 async def api_chat(request: Request):
-    """チャットリクエスト API"""
+    """チャットリクエスト API（ツール対応版）"""
     session = check_auth(request)
     if not session:
         raise HTTPException(status_code=401, detail="認証が必要です")
@@ -269,22 +273,21 @@ async def api_chat(request: Request):
     messages = body.get("messages", [])
     model = body.get("model", "")
     temperature = body.get("temperature", 0.7)
-    max_tokens = body.get("max_tokens", 2048)
+    max_tokens = body.get("max_tokens", 8192)
+    tools = body.get("tools", [])  # 追加
 
     if not messages:
-        return JSONResponse(
-            {"error": "メッセージが空です"}, status_code=400
-        )
+        return JSONResponse({"error": "メッセージが空です"}, status_code=400)
 
-    # LM Studio に送信
-    assistant_reply = await send_to_lm_studio(
+    # ツール対応のチャット処理を呼び出し
+    assistant_reply = await chat_with_tools(
         messages=messages,
-        model=model,
+        tools=tools,
         temperature=temperature,
-        max_tokens=max_tokens,
+        max_tokens=max_tokens
     )
 
-    # 履歴に保存
+    # 履歴に保存（ツール呼び出し履歴も含める場合は current_messages を渡すように拡張可能）
     append_to_history(session, "user", messages[-1]["content"])
     append_to_history(session, "assistant", assistant_reply)
 
@@ -293,6 +296,127 @@ async def api_chat(request: Request):
         "history": get_session_history(session),
     })
 
+
+# ─── MCP ツール実行 ──────────────────────────────────────────────────────────
+
+async def call_mcp_tool(tool_name: str, tool_args: dict) -> str:
+    """
+    stdio MCP サーバーを起動してツールを呼び出し、結果を文字列で返す。
+    呼び出しのたびに新しいプロセスを起動する（ステートレス）。
+    """
+    try:
+        async with stdio_client(config.Config.get_mcp_server_params()) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, tool_args)
+                # result.content はリスト。TextContent を結合して返す
+                parts = []
+                for block in result.content:
+                    if hasattr(block, "text"):
+                        parts.append(block.text)
+                    else:
+                        parts.append(str(block))
+                return "\n".join(parts)
+    except Exception as e:
+        return json.dumps({"error": f"MCPツール呼び出しエラー: {str(e)}"}, ensure_ascii=False)
+
+
+async def chat_with_tools(
+    messages: list[dict],
+    tools: Optional[list[dict]] = None,
+    temperature: float = 0.7,
+    max_tokens: int = 8192,
+    max_tool_iterations: int = 5
+) -> str:
+    """
+    ツール呼び出しに対応したチャット処理。
+    tool_calls が返ってきたら MCP サーバーを実際に呼び出して
+    tool_result を組み立て、LM Studio に再送して最終応答を得る。
+    """
+    current_messages = list(messages)
+    tool_definitions = list(tools) if tools else []
+
+    api_key = config.Config.get_api_key()
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    for iteration in range(max_tool_iterations):
+        payload = {
+            "messages": current_messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if tool_definitions:
+            payload["tools"] = tool_definitions
+            payload["tool_choice"] = "auto"
+
+        print(f"[chat_with_tools] iteration={iteration}, messages={len(current_messages)}, tools={len(tool_definitions)}")
+        print(f"[chat_with_tools] payload={json.dumps(payload, ensure_ascii=False)[:600]}")
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.post(
+                    config.Config.get_api_endpoint(),
+                    headers=headers,
+                    json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as e:
+            return f"⚠️ HTTPエラー: {e.response.status_code} - {e.response.text}"
+        except Exception as e:
+            return f"⚠️ API通信エラー: {str(e)}"
+
+        print(f"[chat_with_tools] response={json.dumps(data, ensure_ascii=False)[:600]}")
+
+        choice = data["choices"][0]
+        finish_reason = choice.get("finish_reason", "")
+        assistant_msg = choice["message"]
+        tool_calls = assistant_msg.get("tool_calls") or []
+
+        # ── ツール呼び出しなし → 最終応答 ─────────────────────────────
+        if not tool_calls:
+            content = assistant_msg.get("content")
+            return content if content is not None else ""
+
+        # ── ツール呼び出しあり → MCP サーバーを実際に呼ぶ ─────────────
+        # assistant メッセージを履歴に追加
+        current_messages.append({
+            "role": "assistant",
+            "content": assistant_msg.get("content"),
+            "tool_calls": tool_calls,
+        })
+
+        # 各 tool_call を MCP で実行し tool_result を追加
+        for call in tool_calls:
+            func_name = call["function"]["name"]
+            raw_args = call["function"].get("arguments", "{}")
+            if isinstance(raw_args, str):
+                try:
+                    func_args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    func_args = {}
+            else:
+                func_args = raw_args
+
+            # None 文字列を実際の None に変換（モデルが "None" を渡してくる場合の対策）
+            sanitized_args = {
+                k: (None if v in (None, "None", "null", "") else v)
+                for k, v in func_args.items()
+            }
+
+            print(f"[chat_with_tools] calling MCP tool: {func_name}({sanitized_args})")
+            result_content = await call_mcp_tool(func_name, sanitized_args)
+            print(f"[chat_with_tools] MCP result: {result_content[:300]}")
+
+            current_messages.append({
+                "role": "tool",
+                "tool_call_id": call["id"],
+                "content": result_content,
+            })
+
+    return "⚠️ ツール呼び出しの最大反復回数を超えました。"
 
 @app.get("/api/history/{session_id}")
 async def api_get_history(session_id: str, request: Request):

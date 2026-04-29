@@ -5,6 +5,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from mcp import StdioServerParameters
 
 # スクリプトのディレクトリにある .env を安全に読み込む
 _env_path = Path(__file__).parent / ".env"
@@ -57,4 +58,22 @@ class Config:
         return (
             username == Config.get_auth_username()
             and password == Config.get_auth_password()
+        )
+
+    # ─── MCP サーバー設定 ────────────────────────────────────────────────────
+  
+    MCP_COMMAND = r"uv"
+    MCP_ARGS = [
+        "run",
+        "--directory",
+        r"E:\MY-MCPSV-POSTGRES\MCP-SERVER",
+        "python",
+        "server.py",
+    ]
+
+    @staticmethod
+    def get_mcp_server_params() -> StdioServerParameters:
+        return StdioServerParameters(
+            command=Config.MCP_COMMAND,
+            args=Config.MCP_ARGS,
         )

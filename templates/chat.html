@@ -37,7 +37,30 @@
                 <span id="temperatureValue">0.7</span>
 
                 <label style="margin-top:10px">最大トークン数</label>
-                <input type="number" id="maxTokens" min="1" max="8192" value="2048" class="sidebar-input">
+                <input type="number" id="maxTokens" min="2048" max="262144" value="8192" class="sidebar-input">
+            </div>
+            
+            <!-- ツール設定 -->
+            <div class="sidebar-section">
+                <label>Function Calling ツール (JSON)</label>
+                <textarea id="toolConfig" class="sidebar-input" rows="6" placeholder='[
+  {
+    "type": "function",
+    "function": {
+      "name": "search_web",
+      "description": "ウェブ検索を実行",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string"}
+        },
+        "required": ["query"]
+      }
+    }
+  }
+]' style="font-family: monospace; font-size: 11px;"></textarea>
+                <button class="btn-small" onclick="parseTools()">🔄 ツール読み込み</button>
+                <div id="toolStatus" style="font-size:11px; margin-top:4px; color:#888;">⚠️ ツール未登録</div>
             </div>
 
             <!-- アクション -->
@@ -146,6 +169,7 @@
         // ─── グローバル変数 ───────────────────────────────────────────────
         let currentSessionId = "{{ session_id }}";
         let isStreaming = false;
+        let currentTools = [];
 
         // ─── 初期化 ──────────────────────────────────────────────────────
         document.addEventListener('DOMContentLoaded', () => {
@@ -190,6 +214,33 @@
                 });
             } catch (e) {
                 console.error('モデル取得エラー:', e);
+            }
+        }
+
+        // ツール読み込み関数（修正版）
+        function parseTools() {
+            const raw = document.getElementById('toolConfig').value.trim();
+            const statusEl = document.getElementById('toolStatus');
+            if (!raw) {
+                currentTools = [];
+                if (statusEl) statusEl.textContent = '⚠️ ツール未登録';
+                alert('ツール設定が空です');
+                return;
+            }
+            try {
+                const parsed = JSON.parse(raw);
+
+                if (!Array.isArray(parsed)) {
+                    alert('⚠️ 誤った形式です。OpenAI 互換の「ツールスキーマ配列」[ {type: "function", ...} ] を貼り付けてください。\n\nLM Studio の「Custom Tools」→「Export」から取得できます。');
+                    return;
+                }
+
+                currentTools = parsed;
+                const names = currentTools.map(t => t.function?.name || '?').join(', ');
+                if (statusEl) statusEl.textContent = `✅ ${currentTools.length}件登録: ${names}`;
+                alert(`✅ ${currentTools.length} 件のツールを登録しました\n\n${names}`);
+            } catch (e) {
+                alert('⚠️ JSON パースエラー: ' + e.message);
             }
         }
 
@@ -247,6 +298,17 @@
             const temperature = parseFloat(document.getElementById('temperature').value);
             const maxTokens = parseInt(document.getElementById('maxTokens').value);
 
+            // ツールが登録されている場合はローディングメッセージに表示
+            if (currentTools.length > 0) {
+                const loadingContent = document.querySelector(`#${loadingId} .message-content`);
+                if (loadingContent) {
+                    loadingContent.innerHTML = `
+                        <div class="loading-dots"><span></span><span></span><span></span></div>
+                        <div style="font-size:11px; color:#888; margin-top:4px;">🔧 ツール使用中 (${currentTools.length}件登録済み)</div>
+                    `;
+                }
+            }
+
             try {
                 const res = await fetch('/api/chat', {
                     method: 'POST',
@@ -255,7 +317,8 @@
                         messages: messages,
                         model: model,
                         temperature: temperature,
-                        max_tokens: maxTokens
+                        max_tokens: maxTokens,
+                        tools: currentTools   // ← ツール定義を送信
                     })
                 });
 
