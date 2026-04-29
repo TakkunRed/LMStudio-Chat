@@ -10,6 +10,7 @@ dependencies = [
     "jinja2>=3.1.0",
     "python-multipart>=0.0.20",
     "httpx>=0.28.0",
+    "mcp>=1.27.0",
 ]
 
 # ✅ hatchling をビルドバックエンドに指定（uv 公式推奨・フラットレイアウト対応）
