@@ -350,7 +350,7 @@ APP_PASSWORD={body.get('app_password', 'changeme')}
 
 # サーバー設定
 APP_HOST=0.0.0.0
-APP_PORT=8000
+APP_PORT=8021
 """
 
     with open(env_path, "w", encoding="utf-8") as f:
